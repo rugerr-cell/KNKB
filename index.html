@@ -13,17 +13,17 @@
 </style>
 </head>
 <body><main class="wrap">
-<div class="top"><div class="brand"><h1>15M Command Center</h1><div class="sub">LIVE KALSHI + CRYPTO DATA • PAPER MODE</div></div><div class="status" id="status">CONNECTING</div></div>
+<div class="top"><div class="brand"><h1>15M Command Center</h1><div class="sub">KNKB V7 • LIVE KALSHI + CRYPTO DATA • PAPER MODE</div></div><div class="status" id="status">CONNECTING</div></div>
 <div class="toolbar" id="toolbar">
 <button data-filter="ALL" class="active">ALL</button><button data-filter="STRONG">TOP SETUPS</button><button data-filter="BTC">BTC</button><button data-filter="FINAL5">FINAL 5M</button><button id="refresh">REFRESH</button>
 </div>
-<div class="summary"><div class="sum"><div class="k">MARKETS</div><div class="v" id="marketCount">—</div></div><div class="sum"><div class="k">TOP SCORE</div><div class="v" id="topScore">—</div></div><div class="sum"><div class="k">API SPEED</div><div class="v" id="apiSpeed">—</div></div></div>
+<div class="summary"><div class="sum"><div class="k">MARKETS</div><div class="v" id="marketCount">—</div></div><div class="sum"><div class="k">TOP SCORE</div><div class="v" id="topScore">—</div></div><div class="sum"><div class="k">API SPEED</div><div class="v" id="apiSpeed">—</div></div><div class="sum"><div class="k">TRACKED</div><div class="v" id="tracked">—</div></div><div class="sum"><div class="k">SETTLED</div><div class="v" id="settled">—</div></div><div class="sum"><div class="k">WIN RATE*</div><div class="v" id="winRate">—</div></div></div>
 <div id="app"></div>
-<div class="note"><b>Paper-mode model:</b> this ranks setups using target distance, short-term momentum, realized volatility, Kalshi implied probability, and order-book imbalance. It is a heuristic until enough results are logged and calibrated. A high score is not a guaranteed winner.</div>
+<div class="note"><b>Paper-mode model:</b> this ranks setups using target distance, short-term momentum, realized volatility, Kalshi implied probability, and order-book imbalance. V7 logs snapshots every 30-second time bucket and grades directional signals only after Kalshi reports an explicit settlement result. <b>*Win rate</b> is directional paper-signal accuracy, not profit or guaranteed future performance.</div>
 <div class="fresh" id="fresh">Waiting for first scan…</div>
 </main>
 <script>
-let data=[],filter="ALL",lastServerTime=null;
+let data=[],filter="ALL",lastServerTime=null,lastPerformance=null;
 const $=id=>document.getElementById(id);
 const fmtPct=(x,d=1)=>x==null?"—":(x*100).toFixed(d)+"%";
 const fmtSignedPct=(x,d=2)=>x==null?"—":(x>=0?"+":"")+x.toFixed(d)+"%";
@@ -33,7 +33,14 @@ const clock=s=>{s=Math.max(0,Math.round(s));return Math.floor(s/60)+":"+String(s
 const trendClass=x=>x>0?"up":x<0?"down":"flat";
 const trendArrow=x=>x>0?"▲":x<0?"▼":"•";
 function filtered(){return data.filter(x=>filter==="ALL"||(filter==="BTC"&&x.asset==="BTC")||(filter==="STRONG"&&x.setup_score>=60)||(filter==="FINAL5"&&x.seconds_left<=300));}
-function renderSummary(){ $("marketCount").textContent=data.length; $("topScore").textContent=data.length?Math.max(...data.map(x=>x.setup_score||0)).toFixed(0):"—"; }
+function renderSummary(){
+ $("marketCount").textContent=data.length;
+ $("topScore").textContent=data.length?Math.max(...data.map(x=>x.setup_score||0)).toFixed(0):"—";
+ const p=lastPerformance||{};
+ $("tracked").textContent=p.markets_tracked??"—";
+ $("settled").textContent=p.markets_settled??"—";
+ $("winRate").textContent=p.win_rate==null?"—":(p.win_rate*100).toFixed(1)+"%";
+}
 function render(){
  const rows=filtered(); renderSummary();
  $("app").innerHTML=rows.map(x=>{
@@ -64,19 +71,24 @@ function render(){
  }).join("") || `<div class="card empty">No markets match this filter right now.</div>`;
 }
 async function load(){
+ $("status").textContent='LOADING';
  const ctrl=new AbortController(),timeout=setTimeout(()=>ctrl.abort(),15000);
  try{
-   const r=await fetch('/api/scan?ts='+Date.now(),{signal:ctrl.signal,cache:'no-store'});
+   const r=await fetch('/api/scan?ts='+Date.now(),{signal:ctrl.signal,cache:'no-store',headers:{'Accept':'application/json'}});
    if(!r.ok) throw new Error('HTTP '+r.status);
-   const j=await r.json(); data=j.markets||[]; lastServerTime=j.server_time;
+   const j=await r.json();
+   if(!j || !Array.isArray(j.markets)) throw new Error('Invalid scan payload');
+   data=j.markets; lastServerTime=j.server_time; lastPerformance=j.performance||null;
    $("status").textContent=j.live?'● LIVE':'DATA ERROR';
    $("apiSpeed").textContent=(j.elapsed_ms??0)+'ms';
    render();
-   if(j.errors?.length&&!data.length){$("app").innerHTML=`<div class="card"><div class="err">${j.errors.map(x=>x.asset+': '+x.error).join('<br>')}</div></div>`;}
-   $("fresh").textContent='Last scan '+new Date().toLocaleTimeString();
+   if(j.errors?.length&&!data.length){$("app").innerHTML=`<div class="card"><div class="err">${j.errors.map(x=>(x.asset||'API')+': '+(x.error||'unknown error')).join('<br>')}</div></div>`;}
+   $("fresh").textContent='V7 • Last scan '+new Date().toLocaleTimeString()+' • '+(j.model||'model unknown');
  }catch(e){
+   console.error('KNKB load error',e);
    $("status").textContent=e.name==='AbortError'?'TIMEOUT':'OFFLINE';
-   $("app").innerHTML='<div class="card"><div class="err">Scanner API did not respond. Tap Refresh.</div></div>';
+   $("app").innerHTML='<div class="card"><div class="err">Scanner display error: '+String(e.message||e)+'. Tap Refresh.</div></div>';
+   $("fresh").textContent='V7 frontend • '+new Date().toLocaleTimeString();
  }finally{clearTimeout(timeout)}
 }
 $("toolbar").addEventListener('click',e=>{const b=e.target.closest('button[data-filter]');if(!b)return;filter=b.dataset.filter;document.querySelectorAll('button[data-filter]').forEach(x=>x.classList.toggle('active',x===b));render();});

@@ -1,30 +1,30 @@
-# KNKB 15M Command Center v4
+# KNKB 15M Command Center V7
 
-Mobile-first paper-mode dashboard for Kalshi 15-minute crypto markets.
+Mobile-first paper-mode scanner for Kalshi 15-minute crypto markets.
 
-## Features
-- Current Kalshi 15m contract discovery
-- Coinbase spot price
-- 3m/5m/10m momentum
-- 10m realized volatility and 5m range
-- Kalshi order-book imbalance
-- Target distance
-- Kalshi implied probability vs heuristic model probability
-- Estimated edge and 0-100 setup ranking
-- ALL / TOP SETUPS / BTC / FINAL 5M filters
-- API caching to reduce upstream rate pressure
-- Render health route and HEAD / support
+## V7 changes
+- More robust frontend connection state: LOADING / LIVE / OFFLINE / TIMEOUT.
+- Frontend errors are shown on-screen instead of silently remaining on CONNECTING.
+- Strong no-cache headers for the phone UI.
+- Fixed model-status text encoding by using an ASCII-safe label.
+- SQLite signal history: one snapshot per ticker per 30-second time-to-expiry bucket.
+- Automatic settlement checks using Kalshi's explicit market result only.
+- `/api/performance` returns tracked/settled counts and directional paper-signal accuracy.
+- `/api/history?limit=100` returns recent logged signal snapshots.
+- Dashboard shows tracked markets, settled markets and paper-signal win rate.
 
-## Render
+## Deploy on Render
 Build command:
-
-    pip install -r requirements.txt
+`pip install -r requirements.txt`
 
 Start command:
+`uvicorn app:app --host 0.0.0.0 --port $PORT`
 
-    uvicorn app:app --host 0.0.0.0 --port $PORT
+Health check:
+`/api/health`
 
-Keep Render Root Directory blank when these files are at the repository root.
+## Important storage note
+The default history database is `knkb_history.db` on the app filesystem. On Render instances without persistent disk storage, this history can reset after a redeploy or instance replacement. Set `KNKB_DB_PATH` to a persistent mounted path if you add a Render persistent disk, or migrate the history layer to a managed database for long-term calibration.
 
-## Important
-This is paper mode. The probability score is a heuristic, not a trained/calibrated model and not a guarantee of a profitable trade.
+## Model note
+This remains a heuristic paper-mode research tool. The displayed model probability and setup score are not calibrated guarantees. V7's logging exists specifically so later versions can be evaluated against real settled outcomes before trusting the model more heavily.
