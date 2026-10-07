@@ -24,7 +24,7 @@ ASSETS = {
     "HYPE": "KXHYPE15M",
 }
 
-app = FastAPI(title="Kalshi 15M Market Command Center", version="4.0")
+app = FastAPI(title="Kalshi 15M Market Command Center", version="5.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 session = requests.Session()
@@ -338,20 +338,44 @@ def analyze(asset, market):
     }
 
 
+def fetch_series_markets(asset, series):
+    """Fetch open markets for one Kalshi series directly.
+
+    V4 fetched a generic page of open markets and then filtered it locally.
+    Kalshi has enough open markets that a 15-minute crypto contract may not be in
+    that page. Querying by series_ticker makes discovery deterministic.
+    """
+    payload = kalshi_json(
+        "/markets",
+        {"series_ticker": series, "status": "open", "limit": 100},
+        timeout=6,
+    )
+    markets = payload.get("markets", [])
+    return asset, markets if isinstance(markets, list) else []
+
+
 def build_scan():
     started = time.time()
     errors = []
-    try:
-        payload = kalshi_json("/markets", {"status": "open", "limit": 1000}, timeout=7)
-        markets = payload.get("markets", [])
-    except Exception as exc:
-        return {
-            "markets": [],
-            "errors": [{"asset": "KALSHI", "error": str(exc)}],
-            "live": False,
-            "elapsed_ms": round((time.time() - started) * 1000),
-            "server_time": datetime.now(timezone.utc).isoformat(),
+    discovery = {}
+    markets = []
+
+    # Query each 15-minute crypto series directly instead of relying on the
+    # first generic page of all open Kalshi markets.
+    with ThreadPoolExecutor(max_workers=len(ASSETS)) as pool:
+        futures = {
+            pool.submit(fetch_series_markets, asset, series): asset
+            for asset, series in ASSETS.items()
         }
+        for future in as_completed(futures):
+            asset = futures[future]
+            try:
+                _, series_markets = future.result()
+                discovery[asset] = len(series_markets)
+                markets.extend(series_markets)
+            except Exception as exc:
+                discovery[asset] = 0
+                errors.append({"asset": asset, "stage": "market_discovery", "error": str(exc)})
 
     chosen = select_open_markets(markets)
     rows = []
@@ -363,7 +387,7 @@ def build_scan():
                 try:
                     rows.append(future.result())
                 except Exception as exc:
-                    errors.append({"asset": asset, "error": str(exc)})
+                    errors.append({"asset": asset, "stage": "analysis", "error": str(exc)})
 
     rows.sort(key=lambda x: (x["setup_score"], abs(x["edge"])), reverse=True)
     return {
@@ -371,15 +395,16 @@ def build_scan():
         "errors": errors,
         "live": True,
         "found": list(chosen.keys()),
+        "discovery": discovery,
         "elapsed_ms": round((time.time() - started) * 1000),
         "server_time": datetime.now(timezone.utc).isoformat(),
-        "model": "KNKB heuristic v4",
+        "model": "KNKB heuristic v5",
     }
 
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "version": "4.0", "time": datetime.now(timezone.utc).isoformat()}
+    return {"ok": True, "version": "5.0", "time": datetime.now(timezone.utc).isoformat()}
 
 
 @app.get("/api/scan")
