@@ -1,57 +1,85 @@
-
-<!doctype html><html><head>
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#080a0f"><title>15M AI Scanner</title>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#07090e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>KNKB 15M Command Center</title>
 <style>
-*{box-sizing:border-box}body{margin:0;background:#080a0f;color:#f4f6fa;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-.wrap{max-width:620px;margin:auto;padding:16px 13px 35px}.top{display:flex;justify-content:space-between;align-items:center}
-h1{font-size:23px;margin:0}.sub{font-size:11px;color:#8993a5;margin-top:3px}.status{font-size:11px;border:1px solid #294333;padding:7px 9px;border-radius:99px;color:#9ce5b6}
-.toolbar{display:flex;gap:7px;overflow:auto;margin-top:14px}.toolbar button{white-space:nowrap;background:#151a24;color:#dbe2ec;border:1px solid #273044;border-radius:10px;padding:9px 13px}
-.card{background:#111620;border:1px solid #222b3b;border-radius:18px;padding:15px;margin-top:11px}.row{display:flex;justify-content:space-between}.asset{font-size:18px;font-weight:800}.timer{font-size:20px;font-variant-numeric:tabular-nums}.title{font-size:11px;color:#8993a5;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.price{font-size:27px;font-weight:850;margin-top:10px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}.metric{background:#0b0e15;border-radius:11px;padding:10px}.label{font-size:9px;color:#737e90}.val{font-size:17px;font-weight:750;margin-top:3px}.signal{text-align:center;font-weight:900;font-size:18px;padding:12px;border-radius:12px;margin-top:11px}.buy{background:#123a28;color:#9df1ba}.watch{background:#3b3219;color:#f4d47a}.pass{background:#251b21;color:#c99daa}.meta{font-size:10px;color:#778294;line-height:1.5;margin-top:9px}.note{background:#111620;border:1px solid #222b3b;border-radius:15px;padding:12px;margin-top:12px;color:#8c96a7;font-size:10px;line-height:1.5}.err{color:#ff9aa9;font-size:11px}
-</style></head><body><main class="wrap">
-<div class="top"><div><h1>15M AI Scanner</h1><div class="sub">LIVE MARKET DATA • PAPER MODE</div></div><div class="status" id="status">CONNECTING</div></div>
-<div class="toolbar"><button onclick="filter='ALL';render()">ALL</button><button onclick="filter='STRONG';render()">STRONG</button><button onclick="filter='BTC';render()">BTC</button><button onclick="load()">REFRESH</button></div>
+:root{--bg:#07090e;--panel:#111722;--panel2:#0b1018;--line:#273145;--muted:#8994a8;--text:#f4f7fb;--green:#9ff1bd;--greenbg:#123828;--yellow:#f6d67c;--yellowbg:#3a3018;--red:#ff9faf;--redbg:#321c23;--blue:#9fc7ff}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}html,body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}body{min-height:100vh}.wrap{max-width:680px;margin:auto;padding:calc(14px + env(safe-area-inset-top)) 14px calc(42px + env(safe-area-inset-bottom))}.top{display:flex;justify-content:space-between;align-items:center;gap:10px}.brand h1{font-size:24px;line-height:1.05;margin:0;font-weight:900}.sub{font-size:10px;color:var(--muted);margin-top:6px;letter-spacing:.5px}.status{font-size:11px;border:1px solid #2e513b;padding:8px 10px;border-radius:999px;color:var(--green);white-space:nowrap}.toolbar{display:flex;gap:7px;overflow-x:auto;margin-top:14px;padding-bottom:2px;scrollbar-width:none}.toolbar::-webkit-scrollbar{display:none}.toolbar button{white-space:nowrap;background:#151b26;color:#dfe6f0;border:1px solid #293349;border-radius:11px;padding:10px 13px;font-weight:700;font-size:12px}.toolbar button.active{border-color:#61718d;background:#202838}.summary{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:11px}.sum{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:10px}.sum .k{font-size:8px;color:var(--muted);letter-spacing:.6px}.sum .v{font-size:17px;font-weight:850;margin-top:4px}.card{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:14px;margin-top:11px;box-shadow:0 8px 30px rgba(0,0,0,.12)}.row{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.asset{font-size:19px;font-weight:900}.score{font-size:10px;color:var(--muted);margin-top:4px}.score b{color:var(--blue)}.timer{font-size:21px;font-weight:800;font-variant-numeric:tabular-nums}.title{font-size:10px;color:var(--muted);margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:440px}.price{font-size:27px;font-weight:900;margin-top:10px}.targetline{font-size:10px;color:var(--muted);margin-top:3px}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:11px}.metric{background:var(--panel2);border:1px solid #171e2b;border-radius:11px;padding:9px}.label{font-size:8px;color:#738095;letter-spacing:.5px}.val{font-size:16px;font-weight:800;margin-top:3px}.small{font-size:12px}.signal{text-align:center;font-weight:900;font-size:16px;padding:12px;border-radius:12px;margin-top:11px;letter-spacing:.2px}.lean{background:var(--greenbg);color:var(--green)}.watch{background:var(--yellowbg);color:var(--yellow)}.pass{background:var(--redbg);color:#d7a6b0}.featurebar{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:9px}.chip{background:#0c1119;border-radius:10px;padding:8px;text-align:center}.chip .k{font-size:7px;color:var(--muted)}.chip .v{font-size:12px;font-weight:800;margin-top:3px}.up{color:var(--green)}.down{color:var(--red)}.flat{color:var(--yellow)}.meta{font-size:9px;color:#758196;line-height:1.55;margin-top:8px}.note{background:var(--panel);border:1px solid var(--line);border-radius:15px;padding:12px;margin-top:12px;color:var(--muted);font-size:10px;line-height:1.5}.err{color:var(--red);font-size:11px;line-height:1.5}.empty{text-align:center;color:var(--muted);padding:18px}.fresh{font-size:9px;color:var(--muted);text-align:right;margin-top:7px}
+</style>
+</head>
+<body><main class="wrap">
+<div class="top"><div class="brand"><h1>15M Command Center</h1><div class="sub">LIVE KALSHI + CRYPTO DATA • PAPER MODE</div></div><div class="status" id="status">CONNECTING</div></div>
+<div class="toolbar" id="toolbar">
+<button data-filter="ALL" class="active">ALL</button><button data-filter="STRONG">TOP SETUPS</button><button data-filter="BTC">BTC</button><button data-filter="FINAL5">FINAL 5M</button><button id="refresh">REFRESH</button>
+</div>
+<div class="summary"><div class="sum"><div class="k">MARKETS</div><div class="v" id="marketCount">—</div></div><div class="sum"><div class="k">TOP SCORE</div><div class="v" id="topScore">—</div></div><div class="sum"><div class="k">API SPEED</div><div class="v" id="apiSpeed">—</div></div></div>
 <div id="app"></div>
-<div class="note"><b>Model warning:</b> probabilities are currently a conservative heuristic, not a proven edge. The system is collecting the inputs needed to calibrate a real model. Do not treat a green signal as a guaranteed winner.</div>
+<div class="note"><b>Paper-mode model:</b> this ranks setups using target distance, short-term momentum, realized volatility, Kalshi implied probability, and order-book imbalance. It is a heuristic until enough results are logged and calibrated. A high score is not a guaranteed winner.</div>
+<div class="fresh" id="fresh">Waiting for first scan…</div>
 </main>
 <script>
-let data=[],filter="ALL";
-const $=x=>document.getElementById(x);
-function pct(x){return x==null?"—":(x*100).toFixed(1)+"%"}
-function cents(x){return x==null?"—":(x*100).toFixed(1)+"¢"}
-function money(x){return x==null?"—":"$"+Number(x).toLocaleString(undefined,{maximumFractionDigits:2})}
-function timer(s){s=Math.max(0,Math.round(s));return Math.floor(s/60)+":"+String(s%60).padStart(2,"0")}
+let data=[],filter="ALL",lastServerTime=null;
+const $=id=>document.getElementById(id);
+const fmtPct=(x,d=1)=>x==null?"—":(x*100).toFixed(d)+"%";
+const fmtSignedPct=(x,d=2)=>x==null?"—":(x>=0?"+":"")+x.toFixed(d)+"%";
+const cents=x=>x==null?"—":(x*100).toFixed(1)+"¢";
+const money=x=>x==null?"—":"$"+Number(x).toLocaleString(undefined,{maximumFractionDigits:x<10?4:2});
+const clock=s=>{s=Math.max(0,Math.round(s));return Math.floor(s/60)+":"+String(s%60).padStart(2,"0")};
+const trendClass=x=>x>0?"up":x<0?"down":"flat";
+const trendArrow=x=>x>0?"▲":x<0?"▼":"•";
+function filtered(){return data.filter(x=>filter==="ALL"||(filter==="BTC"&&x.asset==="BTC")||(filter==="STRONG"&&x.setup_score>=60)||(filter==="FINAL5"&&x.seconds_left<=300));}
+function renderSummary(){ $("marketCount").textContent=data.length; $("topScore").textContent=data.length?Math.max(...data.map(x=>x.setup_score||0)).toFixed(0):"—"; }
 function render(){
- let rows=data.filter(x=>filter==="ALL"||filter==="BTC"&&x.asset==="BTC"||filter==="STRONG"&&Math.abs(x.edge)>=.12);
+ const rows=filtered(); renderSummary();
  $("app").innerHTML=rows.map(x=>{
-   let cls=x.action.startsWith("BUY")?"buy":x.action==="WATCH"?"watch":"pass";
-   let dist=x.distance_pct==null?"—":(x.distance_pct>=0?"+":"")+x.distance_pct.toFixed(3)+"%";
-   return `<section class="card"><div class="row"><div><div class="asset">${x.asset} 15 MIN</div><div class="title">${x.title||x.ticker}</div></div><div class="timer">${timer(x.seconds_left)}</div></div>
-   <div class="price">${money(x.spot)}</div><div class="grid">
-   <div class="metric"><div class="label">AI PROBABILITY</div><div class="val">${pct(x.model_probability)}</div></div>
-   <div class="metric"><div class="label">KALSHI ASK</div><div class="val">${cents(x.yes_ask)}</div></div>
-   <div class="metric"><div class="label">EST. EDGE</div><div class="val">${x.edge>=0?"+":""}${(x.edge*100).toFixed(1)}¢</div></div>
-   <div class="metric"><div class="label">TIME LEFT</div><div class="val">${timer(x.seconds_left)}</div></div></div>
-   <div class="signal ${cls}">${x.action} • ${x.confidence}</div>
-   <div class="meta">Target: ${money(x.target)} • Distance: ${dist} • Order flow: ${(x.orderbook_imbalance*100).toFixed(1)}% • YES qty: ${x.yes_qty.toFixed(1)} • NO qty: ${x.no_qty.toFixed(1)}</div>
-   </section>`
- }).join("") || `<div class="card"><div class="signal pass">NO CURRENT 15M MARKETS FOUND</div></div>`;
+   const action=x.action||"PASS";
+   const cls=action.startsWith("LEAN")?"lean":action.startsWith("WATCH")?"watch":"pass";
+   const dist=x.distance_pct==null?"—":fmtSignedPct(x.distance_pct,3);
+   const mom3=x.momentum_3m;
+   const vol=x.volatility_10m;
+   const edge=(x.edge||0)*100;
+   const trend=(x.trend||"UNKNOWN");
+   return `<section class="card">
+   <div class="row"><div><div class="asset">${x.asset} 15 MIN</div><div class="score">SETUP SCORE <b>${Number(x.setup_score||0).toFixed(0)}/100</b> • ${trend}</div><div class="title">${x.title||x.ticker}</div></div><div class="timer">${clock(x.seconds_left)}</div></div>
+   <div class="price">${money(x.spot)}</div><div class="targetline">Target ${money(x.target)} • Distance ${dist}</div>
+   <div class="grid">
+   <div class="metric"><div class="label">MODEL PROBABILITY</div><div class="val">${fmtPct(x.model_probability)}</div></div>
+   <div class="metric"><div class="label">KALSHI IMPLIED</div><div class="val">${fmtPct(x.market_probability)}</div></div>
+   <div class="metric"><div class="label">EST. EDGE</div><div class="val ${edge>=0?'up':'down'}">${edge>=0?'+':''}${edge.toFixed(1)}¢</div></div>
+   <div class="metric"><div class="label">YES ASK / BID</div><div class="val small">${cents(x.yes_ask)} / ${cents(x.yes_bid)}</div></div>
+   </div>
+   <div class="featurebar">
+     <div class="chip"><div class="k">3M MOMENTUM</div><div class="v ${trendClass(mom3||0)}">${trendArrow(mom3||0)} ${fmtSignedPct(mom3,3)}</div></div>
+     <div class="chip"><div class="k">10M VOL</div><div class="v">${vol==null?'—':vol.toFixed(3)+'%'}</div></div>
+     <div class="chip"><div class="k">ORDER FLOW</div><div class="v ${trendClass(x.orderbook_imbalance||0)}">${fmtSignedPct((x.orderbook_imbalance||0)*100,1)}</div></div>
+   </div>
+   <div class="signal ${cls}">${action} • ${x.confidence}</div>
+   <div class="meta">Time left ${clock(x.seconds_left)} • 5m momentum ${fmtSignedPct(x.momentum_5m,3)} • 5m range ${x.range_5m==null?'—':x.range_5m.toFixed(3)+'%'} • YES qty ${Number(x.yes_qty||0).toFixed(1)} • NO qty ${Number(x.no_qty||0).toFixed(1)}</div>
+   </section>`;
+ }).join("") || `<div class="card empty">No markets match this filter right now.</div>`;
 }
 async function load(){
- const ctrl=new AbortController(); const t=setTimeout(()=>ctrl.abort(),12000);
+ const ctrl=new AbortController(),timeout=setTimeout(()=>ctrl.abort(),15000);
  try{
-   let r=await fetch("/api/scan?ts="+Date.now(),{signal:ctrl.signal,cache:"no-store"});
-   let j=await r.json(); data=j.markets||[];
-   $("status").textContent=j.live?"● LIVE":"DATA ERROR"; render();
-   if(j.errors?.length){
-     console.log(j.errors);
-     if(!data.length) $("app").innerHTML=`<div class="card"><div class="err">${j.errors.map(x=>x.asset+": "+x.error).join("<br>")}</div></div>`;
-   }
+   const r=await fetch('/api/scan?ts='+Date.now(),{signal:ctrl.signal,cache:'no-store'});
+   if(!r.ok) throw new Error('HTTP '+r.status);
+   const j=await r.json(); data=j.markets||[]; lastServerTime=j.server_time;
+   $("status").textContent=j.live?'● LIVE':'DATA ERROR';
+   $("apiSpeed").textContent=(j.elapsed_ms??0)+'ms';
+   render();
+   if(j.errors?.length&&!data.length){$("app").innerHTML=`<div class="card"><div class="err">${j.errors.map(x=>x.asset+': '+x.error).join('<br>')}</div></div>`;}
+   $("fresh").textContent='Last scan '+new Date().toLocaleTimeString();
  }catch(e){
-   $("status").textContent=e.name==="AbortError"?"TIMEOUT":"OFFLINE";
+   $("status").textContent=e.name==='AbortError'?'TIMEOUT':'OFFLINE';
    $("app").innerHTML='<div class="card"><div class="err">Scanner API did not respond. Tap Refresh.</div></div>';
- }finally{clearTimeout(t)}
+ }finally{clearTimeout(timeout)}
 }
-load();setInterval(load,2500);
-setInterval(()=>{data.forEach(x=>x.seconds_left=Math.max(0,x.seconds_left-1));render()},1000);
+$("toolbar").addEventListener('click',e=>{const b=e.target.closest('button[data-filter]');if(!b)return;filter=b.dataset.filter;document.querySelectorAll('button[data-filter]').forEach(x=>x.classList.toggle('active',x===b));render();});
+$("refresh").addEventListener('click',load);
+load();setInterval(load,3000);setInterval(()=>{data.forEach(x=>x.seconds_left=Math.max(0,x.seconds_left-1));render()},1000);
 </script></body></html>
