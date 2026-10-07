@@ -2,7 +2,6 @@ import math
 import re
 import time
 import threading
-import sqlite3
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -26,113 +25,158 @@ ASSETS = {
     "HYPE": "KXHYPE15M",
 }
 
-app = FastAPI(title="Kalshi 15M Market Command Center", version="7.0")
+app = FastAPI(title="Kalshi 15M Market Command Center", version="8.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 session = requests.Session()
-session.headers.update({"User-Agent": "KNKB-15M-Scanner/7.0"})
+session.headers.update({"User-Agent": "KNKB-15M-Scanner/8.0"})
 
 _cache_lock = threading.Lock()
 _scan_cache = {"ts": 0.0, "payload": None}
 _candle_cache = {}
 
-DB_PATH = os.getenv("KNKB_DB_PATH", str(Path(__file__).parent / "knkb_history.db"))
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
+elif DATABASE_URL.startswith("postgresql://") and "+psycopg" not in DATABASE_URL:
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
+
+if DATABASE_URL:
+    DB_URL = DATABASE_URL
+    DB_STORAGE = "postgres-persistent"
+else:
+    DB_PATH = os.getenv("KNKB_DB_PATH", str(Path(__file__).parent / "knkb_history.db"))
+    DB_URL = f"sqlite:///{DB_PATH}"
+    DB_STORAGE = "sqlite-local"
+
+from sqlalchemy import create_engine, text
+
+_engine_kwargs = {"pool_pre_ping": True}
+if DB_URL.startswith("sqlite"):
+    _engine_kwargs["connect_args"] = {"check_same_thread": False}
+engine = create_engine(DB_URL, **_engine_kwargs)
 _db_lock = threading.Lock()
 _last_settlement_sweep = 0.0
 
 
-
 def init_db():
-    with _db_lock:
-        con = sqlite3.connect(DB_PATH)
-        try:
-            con.executescript("""
-            PRAGMA journal_mode=WAL;
-            CREATE TABLE IF NOT EXISTS signals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker TEXT NOT NULL,
-                asset TEXT NOT NULL,
-                series TEXT,
-                captured_at TEXT NOT NULL,
-                seconds_left REAL,
-                time_bucket INTEGER NOT NULL,
-                target REAL,
-                spot REAL,
-                market_probability REAL,
-                model_probability REAL,
-                edge REAL,
-                distance_pct REAL,
-                orderbook_imbalance REAL,
-                momentum_3m REAL,
-                momentum_5m REAL,
-                momentum_10m REAL,
-                volatility_10m REAL,
-                range_5m REAL,
-                trend TEXT,
-                setup_score REAL,
-                action TEXT,
-                confidence TEXT,
-                outcome TEXT,
-                correct INTEGER,
-                UNIQUE(ticker, time_bucket)
-            );
+    with _db_lock, engine.begin() as con:
+        if DB_STORAGE == "postgres-persistent":
+            con.execute(text("""
+                CREATE TABLE IF NOT EXISTS signals (
+                    id BIGSERIAL PRIMARY KEY,
+                    ticker TEXT NOT NULL,
+                    asset TEXT NOT NULL,
+                    series TEXT,
+                    captured_at TEXT NOT NULL,
+                    seconds_left DOUBLE PRECISION,
+                    time_bucket INTEGER NOT NULL,
+                    target DOUBLE PRECISION,
+                    spot DOUBLE PRECISION,
+                    market_probability DOUBLE PRECISION,
+                    model_probability DOUBLE PRECISION,
+                    edge DOUBLE PRECISION,
+                    distance_pct DOUBLE PRECISION,
+                    orderbook_imbalance DOUBLE PRECISION,
+                    momentum_3m DOUBLE PRECISION,
+                    momentum_5m DOUBLE PRECISION,
+                    momentum_10m DOUBLE PRECISION,
+                    volatility_10m DOUBLE PRECISION,
+                    range_5m DOUBLE PRECISION,
+                    trend TEXT,
+                    setup_score DOUBLE PRECISION,
+                    action TEXT,
+                    confidence TEXT,
+                    outcome TEXT,
+                    correct INTEGER,
+                    UNIQUE(ticker, time_bucket)
+                )
+            """))
+        else:
+            con.execute(text("""
+                CREATE TABLE IF NOT EXISTS signals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker TEXT NOT NULL,
+                    asset TEXT NOT NULL,
+                    series TEXT,
+                    captured_at TEXT NOT NULL,
+                    seconds_left REAL,
+                    time_bucket INTEGER NOT NULL,
+                    target REAL,
+                    spot REAL,
+                    market_probability REAL,
+                    model_probability REAL,
+                    edge REAL,
+                    distance_pct REAL,
+                    orderbook_imbalance REAL,
+                    momentum_3m REAL,
+                    momentum_5m REAL,
+                    momentum_10m REAL,
+                    volatility_10m REAL,
+                    range_5m REAL,
+                    trend TEXT,
+                    setup_score REAL,
+                    action TEXT,
+                    confidence TEXT,
+                    outcome TEXT,
+                    correct INTEGER,
+                    UNIQUE(ticker, time_bucket)
+                )
+            """))
+        con.execute(text("""
             CREATE TABLE IF NOT EXISTS tracked_markets (
                 ticker TEXT PRIMARY KEY,
                 asset TEXT NOT NULL,
-                target REAL,
-                close_time REAL,
+                target DOUBLE PRECISION,
+                close_time DOUBLE PRECISION,
                 outcome TEXT,
                 settled_at TEXT,
-                last_checked REAL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS idx_signals_asset ON signals(asset);
-            CREATE INDEX IF NOT EXISTS idx_signals_outcome ON signals(outcome);
-            """)
-            con.commit()
-        finally:
-            con.close()
+                last_checked DOUBLE PRECISION DEFAULT 0
+            )
+        """))
+        con.execute(text("CREATE INDEX IF NOT EXISTS idx_signals_asset ON signals(asset)"))
+        con.execute(text("CREATE INDEX IF NOT EXISTS idx_signals_outcome ON signals(outcome)"))
 
 
 def log_signals(rows):
-    """Store one snapshot per 30-second time-to-close bucket.
-
-    This keeps the history compact while preserving how the signal changed as expiry
-    approached. Duplicate scans inside the same bucket are ignored.
-    """
     if not rows:
         return
     now_iso = datetime.now(timezone.utc).isoformat()
-    with _db_lock:
-        con = sqlite3.connect(DB_PATH)
-        try:
-            for x in rows:
-                seconds_left = max(0.0, num(x.get("seconds_left")))
-                bucket = int(seconds_left // 30) * 30
-                close_time = time.time() + seconds_left
-                con.execute("""
-                    INSERT OR IGNORE INTO tracked_markets
-                    (ticker, asset, target, close_time) VALUES (?, ?, ?, ?)
-                """, (x.get("ticker"), x.get("asset"), x.get("target"), close_time))
-                con.execute("""
-                    INSERT OR IGNORE INTO signals (
-                        ticker, asset, series, captured_at, seconds_left, time_bucket,
-                        target, spot, market_probability, model_probability, edge,
-                        distance_pct, orderbook_imbalance, momentum_3m, momentum_5m,
-                        momentum_10m, volatility_10m, range_5m, trend, setup_score,
-                        action, confidence
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """, (
-                    x.get("ticker"), x.get("asset"), x.get("series"), now_iso,
-                    seconds_left, bucket, x.get("target"), x.get("spot"),
-                    x.get("market_probability"), x.get("model_probability"), x.get("edge"),
-                    x.get("distance_pct"), x.get("orderbook_imbalance"), x.get("momentum_3m"),
-                    x.get("momentum_5m"), x.get("momentum_10m"), x.get("volatility_10m"),
-                    x.get("range_5m"), x.get("trend"), x.get("setup_score"),
-                    x.get("action"), x.get("confidence")
-                ))
-            con.commit()
-        finally:
-            con.close()
+    with _db_lock, engine.begin() as con:
+        for x in rows:
+            seconds_left = max(0.0, num(x.get("seconds_left")))
+            bucket = int(seconds_left // 30) * 30
+            close_time = time.time() + seconds_left
+            con.execute(text("""
+                INSERT INTO tracked_markets (ticker, asset, target, close_time)
+                VALUES (:ticker, :asset, :target, :close_time)
+                ON CONFLICT (ticker) DO NOTHING
+            """), {"ticker": x.get("ticker"), "asset": x.get("asset"), "target": x.get("target"), "close_time": close_time})
+            con.execute(text("""
+                INSERT INTO signals (
+                    ticker, asset, series, captured_at, seconds_left, time_bucket,
+                    target, spot, market_probability, model_probability, edge,
+                    distance_pct, orderbook_imbalance, momentum_3m, momentum_5m,
+                    momentum_10m, volatility_10m, range_5m, trend, setup_score,
+                    action, confidence
+                ) VALUES (
+                    :ticker,:asset,:series,:captured_at,:seconds_left,:time_bucket,
+                    :target,:spot,:market_probability,:model_probability,:edge,
+                    :distance_pct,:orderbook_imbalance,:momentum_3m,:momentum_5m,
+                    :momentum_10m,:volatility_10m,:range_5m,:trend,:setup_score,
+                    :action,:confidence
+                ) ON CONFLICT (ticker, time_bucket) DO NOTHING
+            """), {
+                "ticker": x.get("ticker"), "asset": x.get("asset"), "series": x.get("series"),
+                "captured_at": now_iso, "seconds_left": seconds_left, "time_bucket": bucket,
+                "target": x.get("target"), "spot": x.get("spot"), "market_probability": x.get("market_probability"),
+                "model_probability": x.get("model_probability"), "edge": x.get("edge"), "distance_pct": x.get("distance_pct"),
+                "orderbook_imbalance": x.get("orderbook_imbalance"), "momentum_3m": x.get("momentum_3m"),
+                "momentum_5m": x.get("momentum_5m"), "momentum_10m": x.get("momentum_10m"),
+                "volatility_10m": x.get("volatility_10m"), "range_5m": x.get("range_5m"),
+                "trend": x.get("trend"), "setup_score": x.get("setup_score"), "action": x.get("action"),
+                "confidence": x.get("confidence")
+            })
 
 
 def extract_outcome(payload):
@@ -140,36 +184,27 @@ def extract_outcome(payload):
     result = str(market.get("result") or market.get("settlement_result") or "").lower()
     if result in ("yes", "no"):
         return result.upper()
-    # Some API versions may expose an explicit 1/0 settlement value.
     value = market.get("settlement_value")
     if value is not None:
         try:
             value = float(value)
-            if value == 1:
-                return "YES"
-            if value == 0:
-                return "NO"
+            if value == 1: return "YES"
+            if value == 0: return "NO"
         except Exception:
             pass
     return None
 
 
 def settle_pending(limit=12):
-    """Use Kalshi's explicit settlement result when available; never infer a result."""
     now = time.time()
-    with _db_lock:
-        con = sqlite3.connect(DB_PATH)
-        try:
-            pending = con.execute("""
-                SELECT ticker, asset FROM tracked_markets
-                WHERE outcome IS NULL AND close_time < ? AND (? - last_checked) > 30
-                ORDER BY close_time ASC LIMIT ?
-            """, (now - 3, now, limit)).fetchall()
-            for ticker, asset in pending:
-                con.execute("UPDATE tracked_markets SET last_checked=? WHERE ticker=?", (now, ticker))
-            con.commit()
-        finally:
-            con.close()
+    with _db_lock, engine.begin() as con:
+        pending = con.execute(text("""
+            SELECT ticker, asset FROM tracked_markets
+            WHERE outcome IS NULL AND close_time < :cutoff AND (:now - last_checked) > 30
+            ORDER BY close_time ASC LIMIT :limit
+        """), {"cutoff": now - 3, "now": now, "limit": limit}).fetchall()
+        for ticker, asset in pending:
+            con.execute(text("UPDATE tracked_markets SET last_checked=:now WHERE ticker=:ticker"), {"now": now, "ticker": ticker})
 
     for ticker, asset in pending:
         try:
@@ -178,58 +213,49 @@ def settle_pending(limit=12):
             if not outcome:
                 continue
             settled_at = datetime.now(timezone.utc).isoformat()
-            with _db_lock:
-                con = sqlite3.connect(DB_PATH)
-                try:
-                    con.execute(
-                        "UPDATE tracked_markets SET outcome=?, settled_at=? WHERE ticker=?",
-                        (outcome, settled_at, ticker),
-                    )
-                    rows = con.execute("SELECT id, action FROM signals WHERE ticker=?", (ticker,)).fetchall()
-                    for sid, action in rows:
-                        direction = "YES" if str(action or "").endswith("YES") else ("NO" if str(action or "").endswith("NO") else None)
-                        correct = None if direction is None else int(direction == outcome)
-                        con.execute("UPDATE signals SET outcome=?, correct=? WHERE id=?", (outcome, correct, sid))
-                    con.commit()
-                finally:
-                    con.close()
+            with _db_lock, engine.begin() as con:
+                con.execute(text("UPDATE tracked_markets SET outcome=:outcome, settled_at=:settled_at WHERE ticker=:ticker"),
+                            {"outcome": outcome, "settled_at": settled_at, "ticker": ticker})
+                rows = con.execute(text("SELECT id, action FROM signals WHERE ticker=:ticker"), {"ticker": ticker}).fetchall()
+                for sid, action in rows:
+                    direction = "YES" if str(action or "").endswith("YES") else ("NO" if str(action or "").endswith("NO") else None)
+                    correct = None if direction is None else int(direction == outcome)
+                    con.execute(text("UPDATE signals SET outcome=:outcome, correct=:correct WHERE id=:id"),
+                                {"outcome": outcome, "correct": correct, "id": sid})
         except Exception:
             pass
 
 
 def performance_summary():
-    with _db_lock:
-        con = sqlite3.connect(DB_PATH)
-        con.row_factory = sqlite3.Row
-        try:
-            total = con.execute("SELECT COUNT(*) n FROM signals").fetchone()["n"]
-            settled = con.execute("SELECT COUNT(*) n FROM signals WHERE outcome IS NOT NULL").fetchone()["n"]
-            actionable = con.execute("SELECT COUNT(*) n FROM signals WHERE correct IS NOT NULL").fetchone()["n"]
-            wins = con.execute("SELECT COUNT(*) n FROM signals WHERE correct=1").fetchone()["n"]
-            markets = con.execute("SELECT COUNT(*) n FROM tracked_markets").fetchone()["n"]
-            settled_markets = con.execute("SELECT COUNT(*) n FROM tracked_markets WHERE outcome IS NOT NULL").fetchone()["n"]
-            by_action = [dict(r) for r in con.execute("""
-                SELECT action, COUNT(*) samples, SUM(CASE WHEN correct=1 THEN 1 ELSE 0 END) wins,
-                       SUM(CASE WHEN correct IS NOT NULL THEN 1 ELSE 0 END) graded
-                FROM signals WHERE outcome IS NOT NULL
-                GROUP BY action ORDER BY samples DESC
-            """).fetchall()]
-            return {
-                "snapshots": total,
-                "settled_snapshots": settled,
-                "actionable_graded": actionable,
-                "wins": wins,
-                "win_rate": (wins / actionable) if actionable else None,
-                "markets_tracked": markets,
-                "markets_settled": settled_markets,
-                "by_action": by_action,
-                "storage": "sqlite-local",
-            }
-        finally:
-            con.close()
+    with _db_lock, engine.begin() as con:
+        total = con.execute(text("SELECT COUNT(*) FROM signals")).scalar_one()
+        settled = con.execute(text("SELECT COUNT(*) FROM signals WHERE outcome IS NOT NULL")).scalar_one()
+        actionable = con.execute(text("SELECT COUNT(*) FROM signals WHERE correct IS NOT NULL")).scalar_one()
+        wins = con.execute(text("SELECT COUNT(*) FROM signals WHERE correct=1")).scalar_one()
+        markets = con.execute(text("SELECT COUNT(*) FROM tracked_markets")).scalar_one()
+        settled_markets = con.execute(text("SELECT COUNT(*) FROM tracked_markets WHERE outcome IS NOT NULL")).scalar_one()
+        by_action = [dict(r) for r in con.execute(text("""
+            SELECT action, COUNT(*) samples,
+                   SUM(CASE WHEN correct=1 THEN 1 ELSE 0 END) wins,
+                   SUM(CASE WHEN correct IS NOT NULL THEN 1 ELSE 0 END) graded
+            FROM signals WHERE outcome IS NOT NULL
+            GROUP BY action ORDER BY samples DESC
+        """)).mappings().all()]
+        return {
+            "snapshots": total,
+            "settled_snapshots": settled,
+            "actionable_graded": actionable,
+            "wins": wins,
+            "win_rate": (wins / actionable) if actionable else None,
+            "markets_tracked": markets,
+            "markets_settled": settled_markets,
+            "by_action": by_action,
+            "storage": DB_STORAGE,
+        }
 
 
 init_db()
+
 
 def get_json(url, params=None, timeout=6):
     r = session.get(url, params=params, timeout=timeout)
@@ -653,14 +679,14 @@ def build_scan():
         "discovery": discovery,
         "elapsed_ms": round((time.time() - started) * 1000),
         "server_time": datetime.now(timezone.utc).isoformat(),
-        "model": "KNKB heuristic v7",
+        "model": "KNKB heuristic v8",
         "performance": perf,
     }
 
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "version": "7.0", "time": datetime.now(timezone.utc).isoformat()}
+    return {"ok": True, "version": "8.0", "time": datetime.now(timezone.utc).isoformat()}
 
 
 @app.get("/api/scan")
@@ -686,19 +712,15 @@ def performance():
 @app.get("/api/history")
 def history(limit: int = 100):
     limit = max(1, min(limit, 500))
-    with _db_lock:
-        con = sqlite3.connect(DB_PATH)
-        con.row_factory = sqlite3.Row
-        try:
-            rows = con.execute("""
-                SELECT ticker, asset, captured_at, seconds_left, time_bucket, target, spot,
-                       market_probability, model_probability, edge, setup_score, action,
-                       confidence, outcome, correct
-                FROM signals ORDER BY id DESC LIMIT ?
-            """, (limit,)).fetchall()
-            return {"rows": [dict(r) for r in rows], "count": len(rows)}
-        finally:
-            con.close()
+    with _db_lock, engine.begin() as con:
+        rows = con.execute(text("""
+            SELECT ticker, asset, captured_at, seconds_left, time_bucket, target, spot,
+                   market_probability, model_probability, edge, setup_score, action,
+                   confidence, outcome, correct
+            FROM signals ORDER BY id DESC LIMIT :limit
+        """), {"limit": limit}).mappings().all()
+        rows = [dict(r) for r in rows]
+        return {"rows": rows, "count": len(rows), "storage": DB_STORAGE}
 
 
 @app.head("/")
