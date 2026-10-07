@@ -24,11 +24,11 @@ ASSETS = {
     "HYPE": "KXHYPE15M",
 }
 
-app = FastAPI(title="Kalshi 15M Market Command Center", version="5.0")
+app = FastAPI(title="Kalshi 15M Market Command Center", version="6.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 session = requests.Session()
-session.headers.update({"User-Agent": "KNKB-15M-Scanner/4.0"})
+session.headers.update({"User-Agent": "KNKB-15M-Scanner/6.0"})
 
 _cache_lock = threading.Lock()
 _scan_cache = {"ts": 0.0, "payload": None}
@@ -91,16 +91,67 @@ def select_open_markets(markets):
     return selected
 
 
-def parse_target(market):
-    text = " ".join(str(market.get(k, "")) for k in (
-        "title", "subtitle", "yes_sub_title", "no_sub_title", "rules_primary", "rules_secondary"
-    ))
-    for pattern in (r"\$([0-9][0-9,]*(?:\.[0-9]+)?)", r"([0-9][0-9,]*(?:\.[0-9]+)?)"):
-        for match in re.finditer(pattern, text):
-            value = num(match.group(1).replace(",", ""), None)
-            if value and value > 1:
-                return value
-    return None
+def parse_target(market, spot=None):
+    """Extract the contract reference price without confusing the '15 min' title text for a strike.
+
+    Prefer structured strike fields when Kalshi provides them. Otherwise collect numeric
+    candidates from descriptive fields and, when spot is known, choose the value closest
+    to the live asset price. This is important for sub-$1 assets such as DOGE.
+    """
+    candidates = []
+
+    # Kalshi responses may expose a strike/reference level as a structured field.
+    for key in ("floor_strike", "cap_strike", "strike", "strike_value", "reference_price"):
+        value = num(market.get(key), None)
+        if value is not None and value > 0:
+            candidates.append((0, value, key))
+
+    # Search the descriptive fields before the generic title. Targets can be < $1.
+    text_fields = (
+        "yes_sub_title", "no_sub_title", "subtitle",
+        "rules_primary", "rules_secondary", "title"
+    )
+    for priority, key in enumerate(text_fields, start=1):
+        text = str(market.get(key, "") or "")
+        if not text:
+            continue
+
+        patterns = (
+            r"\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
+            r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:or\s+above|or\s+below|or\s+higher|or\s+lower)",
+            r"(?:above|below|over|under|at|price(?:\s+of)?)\s*\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
+            r"([0-9][0-9,]*(?:\.[0-9]+)?)",
+        )
+        seen = set()
+        for pattern in patterns:
+            for match in re.finditer(pattern, text, flags=re.I):
+                raw = match.group(1).replace(",", "")
+                value = num(raw, None)
+                if value is None or value <= 0 or value in seen:
+                    continue
+                seen.add(value)
+                # Never treat the generic '15 min' wording as the target.
+                tail = text[match.end():match.end()+12].lower()
+                head = text[max(0, match.start()-4):match.start()].lower()
+                if abs(value - 15.0) < 1e-12 and ("min" in tail or "min" in head):
+                    continue
+                candidates.append((priority, value, key))
+
+    if not candidates:
+        return None
+
+    if spot is not None and spot > 0:
+        # A 15-minute reference level should be near the current market. Pick the
+        # candidate nearest to spot and reject obviously unrelated numbers (dates,
+        # '15 minutes', etc.).
+        plausible = [c for c in candidates if 0.25 <= c[1] / spot <= 4.0]
+        if plausible:
+            plausible.sort(key=lambda c: (abs(math.log(c[1] / spot)), c[0]))
+            return plausible[0][1]
+        return None
+
+    candidates.sort(key=lambda c: c[0])
+    return candidates[0][1]
 
 
 def market_prob(market):
@@ -261,7 +312,7 @@ def analyze(asset, market):
         spot = f_spot.result()
         stats = f_stats.result()
 
-    target = parse_target(market)
+    target = parse_target(market, spot)
     distance_pct = None
     distance_z = 0.0
     if spot and target:
@@ -398,13 +449,13 @@ def build_scan():
         "discovery": discovery,
         "elapsed_ms": round((time.time() - started) * 1000),
         "server_time": datetime.now(timezone.utc).isoformat(),
-        "model": "KNKB heuristic v5",
+        "model": "KNKB heuristic v6",
     }
 
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "version": "5.0", "time": datetime.now(timezone.utc).isoformat()}
+    return {"ok": True, "version": "6.0", "time": datetime.now(timezone.utc).isoformat()}
 
 
 @app.get("/api/scan")
