@@ -16,7 +16,7 @@ h1{font-size:23px;margin:0}.sub{font-size:11px;color:#8993a5;margin-top:3px}.sta
 </main>
 <script>
 let data=[],filter="ALL";
-const $=x=>document.querySelector(x);
+const $=x=>document.getElementById(x);
 function pct(x){return x==null?"—":(x*100).toFixed(1)+"%"}
 function cents(x){return x==null?"—":(x*100).toFixed(1)+"¢"}
 function money(x){return x==null?"—":"$"+Number(x).toLocaleString(undefined,{maximumFractionDigits:2})}
@@ -38,8 +38,19 @@ function render(){
  }).join("") || `<div class="card"><div class="signal pass">NO CURRENT 15M MARKETS FOUND</div></div>`;
 }
 async function load(){
- try{let r=await fetch("/api/scan?ts="+Date.now());let j=await r.json();data=j.markets||[];$("status").textContent="● LIVE";render();
- if(j.errors?.length) console.log(j.errors)}catch(e){$("status").textContent="OFFLINE";$("app").innerHTML='<div class="card"><div class="err">Scanner connection failed. Try Refresh.</div></div>'}
+ const ctrl=new AbortController(); const t=setTimeout(()=>ctrl.abort(),12000);
+ try{
+   let r=await fetch("/api/scan?ts="+Date.now(),{signal:ctrl.signal,cache:"no-store"});
+   let j=await r.json(); data=j.markets||[];
+   $("status").textContent=j.live?"● LIVE":"DATA ERROR"; render();
+   if(j.errors?.length){
+     console.log(j.errors);
+     if(!data.length) $("app").innerHTML=`<div class="card"><div class="err">${j.errors.map(x=>x.asset+": "+x.error).join("<br>")}</div></div>`;
+   }
+ }catch(e){
+   $("status").textContent=e.name==="AbortError"?"TIMEOUT":"OFFLINE";
+   $("app").innerHTML='<div class="card"><div class="err">Scanner API did not respond. Tap Refresh.</div></div>';
+ }finally{clearTimeout(t)}
 }
 load();setInterval(load,2500);
 setInterval(()=>{data.forEach(x=>x.seconds_left=Math.max(0,x.seconds_left-1));render()},1000);
