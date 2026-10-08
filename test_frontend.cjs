@@ -11,6 +11,17 @@ const run=s=>vm.runInContext(s,ctx);
 (async()=>{
  await new Promise(setImmediate);
  assert.equal(get('marketCount').textContent,1);
+ ctx.paperFixture={summary:{starting_bank:1000,net_pnl:-5.27,settled:1,pending:1,roi:-1,max_realized_drawdown:5.27,cash:989.46,pending_cost:5.27,settled_rounds:1,fees:.35,slippage_cost:.2},breakdowns:{asset:[{label:'<img src=x>',settled:1,trades:2,win_rate:0,net_pnl:-5.27}]},rows:[{asset:'BTC',side:'YES',contracts:10,fill_price:.51,cost:5.27,fee:.17,pnl:null,captured_at:new Date().toISOString(),seconds_left:200}],equity_curve:[{equity:994.73}]};
+ run('paperRender(paperFixture)');
+ assert(get('paperSummary').innerHTML.includes('$-5.27'));
+ assert(get('paperSummary').innerHTML.includes('<svg'));
+ assert(get('paperBreakdowns').innerHTML.includes('&lt;img'));
+ assert(!get('paperBreakdowns').innerHTML.includes('<img'));
+ assert(get('paperTrades').innerHTML.includes('PENDING'));
+ ctx.paperFixture.equity_curve=[];ctx.paperFixture.summary.settled=0;
+ run('paperRender(paperFixture)');
+ assert(get('paperSummary').innerHTML.includes('No settled paper results yet'));
+ assert(!get('paperSummary').innerHTML.includes('<svg'));
  assert(get('app').innerHTML.includes('&lt;img'));
  assert(!get('app').innerHTML.includes('<img'));
  run('lastReceipt=Date.now()-30000;render()');

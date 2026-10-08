@@ -74,6 +74,7 @@ else:
     DB_STORAGE = "sqlite-local"
 
 from sqlalchemy import create_engine, text, inspect
+import paper
 
 _engine_kwargs = {"pool_pre_ping": True}
 if DB_URL.startswith("sqlite"):
@@ -160,6 +161,7 @@ def init_db():
         """))
         con.execute(text("CREATE INDEX IF NOT EXISTS idx_signals_asset ON signals(asset)"))
         con.execute(text("CREATE INDEX IF NOT EXISTS idx_signals_outcome ON signals(outcome)"))
+        paper.init(con)
         if "signal_version" not in {c["name"] for c in inspect(con).get_columns("signals")}:
             con.execute(text("ALTER TABLE signals ADD COLUMN signal_version TEXT DEFAULT '8.0'"))
 
@@ -203,6 +205,8 @@ def log_signals(rows):
                 "trend": x.get("trend"), "setup_score": x.get("setup_score"), "action": x.get("action"),
                 "confidence": x.get("confidence"), "signal_version": VERSION
             })
+
+        paper.capture(con, rows)
 
 
 def extract_outcome(payload):
@@ -252,6 +256,7 @@ def settle_pending(limit=12):
             with _db_lock, engine.begin() as con:
                 con.execute(text("UPDATE tracked_markets SET outcome=:outcome, settled_at=:settled_at WHERE ticker=:ticker"),
                             {"outcome": outcome, "settled_at": settled_at, "ticker": ticker})
+                paper.settle(con, ticker, outcome, settled_at)
                 rows = con.execute(text("SELECT id, action FROM signals WHERE ticker=:ticker"), {"ticker": ticker}).fetchall()
                 for sid, action in rows:
                     direction = "YES" if str(action or "").endswith("YES") else ("NO" if str(action or "").endswith("NO") else None)
@@ -292,6 +297,7 @@ def performance_summary():
         unique_wins = sum(r["correct"] == 1 for r in latest)
         brier = sum((r["model_probability"] - int(r["outcome"] == "YES")) ** 2 for r in predictions) / len(predictions) if predictions else None
         return {
+            "paper": paper.summary(con),
             "snapshots": total,
             "settled_snapshots": settled,
             "actionable_graded": actionable,
@@ -495,10 +501,12 @@ def orderbook(ticker):
     imbalance = (yes_qty - no_qty) / total if total else 0.0
     yes_bid = yes_levels[0][0] if yes_levels else None
     no_bid = no_levels[0][0] if no_levels else None
-    return {"yes_qty": yes_qty, "no_qty": no_qty, "imbalance": imbalance,
+    return {"book_captured_at": time.time(), "yes_qty": yes_qty, "no_qty": no_qty, "imbalance": imbalance,
             "yes_bid": yes_bid, "no_bid": no_bid,
             "yes_ask": 1 - no_bid if no_bid is not None else None,
-            "no_ask": 1 - yes_bid if yes_bid is not None else None}
+            "no_ask": 1 - yes_bid if yes_bid is not None else None,
+            "yes_asks": [(1-p, q) for p, q in no_levels],
+            "no_asks": [(1-p, q) for p, q in yes_levels]}
 
 
 def spot_price(asset):
@@ -726,6 +734,9 @@ def analyze(asset, market):
         "yes_ask": ask,
         "no_bid": ob["no_bid"],
         "no_ask": no_ask,
+        "book_captured_at": ob.get("book_captured_at"),
+        "yes_asks": ob.get("yes_asks", []),
+        "no_asks": ob.get("no_asks", []),
         "yes_edge": yes_edge,
         "no_edge": no_edge,
         "spread": ask - bid if ask is not None and bid is not None else None,
@@ -846,7 +857,7 @@ def build_scan():
 @app.get("/api/health")
 def health():
     return {"ok": True, "version": VERSION, "time": datetime.now(timezone.utc).isoformat(),
-            "storage": DB_STORAGE, "feed_fallback": "coinbase-kraken",
+            "storage": DB_STORAGE, "paper_policy": paper.POLICY, "feed_fallback": "coinbase-kraken",
             "collector": dict(_collector_status)}
 
 
@@ -902,6 +913,12 @@ def collector(stop):
 @app.get("/api/performance")
 def performance():
     return performance_summary()
+
+
+@app.get("/api/paper")
+def paper_performance():
+    with _db_lock, engine.begin() as con:
+        return paper.summary(con)
 
 
 @app.get("/api/history")

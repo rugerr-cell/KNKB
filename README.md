@@ -12,6 +12,16 @@ Phone dashboard for public Kalshi 15-minute crypto market data, external spot pr
 - Grades one latest directional V9 snapshot per settled market and displays the sample count. Brier score uses one latest valid probability per settled market. Legacy V8 data remains in history but is excluded from V9 headline metrics.
 - Adds history, CSV export, and storage status. Removes arbitrary project-file serving.
 
+## Paper trading lab (paper-v1)
+
+Forward-only shared simulated account with a $1,000 starting bank. The first fresh LEAN YES/NO signal per ticker enters 10 contracts only when displayed top-ten depth covers the entire order and estimated edge after costs is at least 2 cents per contract. WATCH/PASS signals, stale books, unavailable depth, expired markets, and insufficient cash produce no entry. Repeated snapshots never add or flip the position. Old signals are not backfilled.
+
+Fill price walks the purchase-side depth and adds 1 cent per contract as an extra slippage assumption. Modeled general taker fee is `0.07 * multiplier * contracts * price * (1-price)`; multiplier 1 is an explicit assumption, not verified live per series. Following the [Kalshi fee schedule effective July 7, 2026](https://kalshi.com/docs/kalshi-fee-schedule.pdf), position plus fee is rounded upward to $0.0001. The modeled fee uses the average simulated fill; actual fills, per-series fees, and rounding may differ. Each entry freezes its cost assumptions. No settlement fee is modeled.
+
+Positions are held to an explicit settlement result; cash is reduced immediately and credited the winning payout at settlement. Net P&L includes entry fees and slippage. ROI uses settled entry costs. Drawdown uses realized profit by expiry round, grouping simultaneous expiries to avoid artificial asset-order losses; it excludes open mark-to-market risk. Open entry cost is shown separately. Charts show the latest 200 settled rounds; ledger displays the latest 50 entries. Coin, fill-price, and time-left breakdowns show sample counts. These are overlapping groups, not independent evidence, and crypto outcomes may be correlated.
+
+The lab collects while the service runs. Host suspension causes gaps. Persistence shares the existing PostgreSQL database. Policy `paper-v1` is independent of V9 snapshot accuracy; adding paper accounting does not change the prediction heuristic. Changing future entry/cost rules requires a new policy identifier to keep cohorts comparable. This is a simulated ledger, not executed trades or proof of profitability.
+
 ## Render
 
 Build: `pip install -r requirements.txt`
@@ -36,7 +46,8 @@ This is an unvalidated heuristic, not a trained AI or a demonstrated trading adv
 
 - `/api/scan`: shared snapshot, errors, age, and storage status.
 - `/api/health`: version, storage, and collector status.
-- `/api/performance`: counts and distinct-market V9 evaluation.
+- `/api/performance`: counts, distinct-market V9 evaluation, and the paper lab.
+- `/api/paper`: simulated account totals, latest entries, equity curve, assumptions, and breakdowns.
 - `/api/history?limit=100`: snapshots (limit 1–500).
 - `/api/history.csv?limit=500`: downloadable history.
 
@@ -44,3 +55,5 @@ This is an unvalidated heuristic, not a trained AI or a demonstrated trading adv
 
 Install `pytest httpx` and run `python -m pytest -q`. Tests use temporary SQLite, disable the background worker, and mock feeds. They cover quote conversion, missing inputs, target parsing, settlement units, scan concurrency, distinct-market grading, exports, and file-serving restrictions.
 
+
+Paper tests also cover depth walks, fee rounding, cash limits, stale entry rejection, first-entry deduplication, settlement idempotency, profit/loss accounting, and simultaneous-expiry drawdown. Run `node test_frontend.cjs` for rendering, escaping, and refresh checks.

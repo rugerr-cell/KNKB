@@ -20,6 +20,7 @@ def reset(monkeypatch):
     a._scan_cache.update(ts=0, payload=None)
     a._candle_cache.clear()
     with a.engine.begin() as con:
+        con.execute(text('DELETE FROM paper_trades'))
         con.execute(text('DELETE FROM signals'))
         con.execute(text('DELETE FROM tracked_markets'))
 
