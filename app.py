@@ -523,6 +523,35 @@ def spot_price(asset):
         return None
 
 
+def valid_candles(candles, now):
+    if not isinstance(candles, list):
+        raise ValueError("invalid candle response")
+    candles = sorted([c for c in candles if isinstance(c, list) and len(c) >= 6
+                      and 0 < num(c[0], 0) <= now
+                      and all(num(c[i], 0) > 0 for i in (1, 2, 3, 4))], key=lambda x: x[0])[-16:]
+    if len(candles) < 11 or now - num(candles[-1][0]) > 150:
+        raise ValueError("missing or stale candles")
+    if any(b[0] - a[0] != 60 for a, b in zip(candles[-11:-1], candles[-10:])):
+        raise ValueError("non-contiguous candles")
+    return candles
+
+
+def load_candles(asset, now):
+    try:
+        data = get_json(f"{COINBASE_EXCHANGE}/products/{asset}-USD/candles",
+                        params={"granularity": 60}, timeout=6)
+        return valid_candles(data, now)
+    except Exception:
+        pair = "XBTUSD" if asset == "BTC" else asset + "USD"
+        data = get_json("https://api.kraken.com/0/public/OHLC", {"pair": pair, "interval": 1}, timeout=6)
+        result = data.get("result") or {}
+        rows = next((v for k, v in result.items() if k != "last"), [])
+        # Kraken: time, open, high, low, close, VWAP, volume, count.
+        converted = [[num(c[0]), num(c[3]), num(c[2]), num(c[1]), num(c[4]), num(c[6])]
+                     for c in rows if isinstance(c, list) and len(c) >= 7]
+        return valid_candles(converted, now)
+
+
 def candle_stats(asset):
     """Return short-horizon momentum + realized volatility from Coinbase 1m candles.
 
@@ -546,21 +575,7 @@ def candle_stats(asset):
     }
 
     try:
-        candles = get_json(
-            f"{COINBASE_EXCHANGE}/products/{asset}-USD/candles",
-            params={"granularity": 60},
-            timeout=6,
-        )
-        if not isinstance(candles, list) or len(candles) < 6:
-            raise ValueError("not enough candle data")
-
-        candles = sorted([c for c in candles if isinstance(c, list) and len(c) >= 6
-                          and 0 < num(c[0], 0) <= now
-                          and all(num(c[i], 0) > 0 for i in (1, 2, 3, 4))], key=lambda x: x[0])[-16:]
-        if len(candles) < 11 or now - num(candles[-1][0]) > 150:
-            raise ValueError("missing or stale candles")
-        if any(b[0] - a[0] != 60 for a, b in zip(candles[-11:-1], candles[-10:])):
-            raise ValueError("non-contiguous candles")
+        candles = load_candles(asset, now)
         closes = [num(c[4], None) for c in candles if len(c) >= 5]
         highs = [num(c[2], None) for c in candles if len(c) >= 5]
         lows = [num(c[1], None) for c in candles if len(c) >= 5]
@@ -831,7 +846,8 @@ def build_scan():
 @app.get("/api/health")
 def health():
     return {"ok": True, "version": VERSION, "time": datetime.now(timezone.utc).isoformat(),
-            "storage": DB_STORAGE, "collector": dict(_collector_status)}
+            "storage": DB_STORAGE, "feed_fallback": "coinbase-kraken",
+            "collector": dict(_collector_status)}
 
 
 @app.get("/api/scan")

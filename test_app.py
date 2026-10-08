@@ -84,6 +84,17 @@ def test_gapped_candles_rejected(monkeypatch):
     monkeypatch.setattr(a,'get_json',lambda *args,**kw:candles)
     assert a.candle_stats('BTC')['source_time'] is None
 
+def test_kraken_candle_fallback(monkeypatch):
+    now=int(time.time())
+    rows=[[now-i*60,'100','110','90','101','100','2',1] for i in range(16)]
+    def feed(url,params=None,**kw):
+        if 'coinbase' in url:raise RuntimeError('unavailable')
+        return {'result':{'last':now,'XXBTZUSD':rows}}
+    monkeypatch.setattr(a,'get_json',feed)
+    candles=a.load_candles('BTC',now)
+    assert candles[-1][1:5]==[90,110,100,101]
+    assert a.candle_stats('BTC')['source_time']==now
+
 @pytest.mark.parametrize('kwargs',[{'spot':None},{'no':None},{'candles':False}])
 def test_incomplete_inputs_never_signal(monkeypatch,kwargs):
     sources(monkeypatch,**kwargs)

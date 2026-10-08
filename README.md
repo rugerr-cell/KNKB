@@ -6,6 +6,7 @@ Phone dashboard for public Kalshi 15-minute crypto market data, external spot pr
 
 - Derives purchase prices from the opposite side's best order-book bid and uses the best ten levels.
 - Shows YES/NO purchase prices and gross edge before fees. Signals require a target, spot feed, fresh contiguous candles, and a usable two-sided book; otherwise the card says PASS and explains missing inputs.
+- Uses Kraken USD spot/candles as a fallback when Coinbase data is unavailable or stale. Both remain external proxies for settlement.
 - Collects in the background while the service is running. Concurrent phones share a scan. Settlement polling runs separately.
 - Pauses displayed signals on stale data and expired contracts. Refreshes are serialized and resume when Safari becomes visible.
 - Grades one latest directional V9 snapshot per settled market and displays the sample count. Brier score uses one latest valid probability per settled market. Legacy V8 data remains in history but is excluded from V9 headline metrics.
