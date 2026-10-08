@@ -3,13 +3,18 @@ import re
 import time
 import threading
 import os
+import asyncio
+import logging
+import csv
+import io
+from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 KALSHI_BASE = "https://external-api.kalshi.com/trade-api/v2"
@@ -25,15 +30,34 @@ ASSETS = {
     "HYPE": "KXHYPE15M",
 }
 
-app = FastAPI(title="Kalshi 15M Market Command Center", version="8.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+VERSION = "9.0"
+SCAN_INTERVAL = max(3.0, float(os.getenv("KNKB_SCAN_INTERVAL", "5")))
+STALE_AFTER = max(20.0, SCAN_INTERVAL * 3)
+logger = logging.getLogger("knkb")
+
+@asynccontextmanager
+async def lifespan(app):
+    stop = threading.Event()
+    worker = threading.Thread(target=collector, args=(stop,), daemon=True, name="knkb-collector")
+    if os.getenv("KNKB_BACKGROUND", "1") != "0":
+        worker.start()
+    yield
+    stop.set()
+    if worker.is_alive():
+        await asyncio.to_thread(worker.join, timeout=2)
+
+app = FastAPI(title="Kalshi 15M Market Command Center", version=VERSION, lifespan=lifespan)
 
 session = requests.Session()
-session.headers.update({"User-Agent": "KNKB-15M-Scanner/8.0"})
+session.headers.update({"User-Agent": "KNKB-15M-Scanner/9.0"})
 
 _cache_lock = threading.Lock()
 _scan_cache = {"ts": 0.0, "payload": None}
 _candle_cache = {}
+_scan_lock = threading.Lock()
+_settlement_lock = threading.Lock()
+_thread_sessions = threading.local()
+_collector_status = {"last_success": None, "last_error": None}
 
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 if DATABASE_URL.startswith("postgres://"):
@@ -49,7 +73,7 @@ else:
     DB_URL = f"sqlite:///{DB_PATH}"
     DB_STORAGE = "sqlite-local"
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, inspect
 
 _engine_kwargs = {"pool_pre_ping": True}
 if DB_URL.startswith("sqlite"):
@@ -136,6 +160,8 @@ def init_db():
         """))
         con.execute(text("CREATE INDEX IF NOT EXISTS idx_signals_asset ON signals(asset)"))
         con.execute(text("CREATE INDEX IF NOT EXISTS idx_signals_outcome ON signals(outcome)"))
+        if "signal_version" not in {c["name"] for c in inspect(con).get_columns("signals")}:
+            con.execute(text("ALTER TABLE signals ADD COLUMN signal_version TEXT DEFAULT '8.0'"))
 
 
 def log_signals(rows):
@@ -146,7 +172,7 @@ def log_signals(rows):
         for x in rows:
             seconds_left = max(0.0, num(x.get("seconds_left")))
             bucket = int(seconds_left // 30) * 30
-            close_time = time.time() + seconds_left
+            close_time = x.get("close_time") or time.time() + seconds_left
             con.execute(text("""
                 INSERT INTO tracked_markets (ticker, asset, target, close_time)
                 VALUES (:ticker, :asset, :target, :close_time)
@@ -158,13 +184,13 @@ def log_signals(rows):
                     target, spot, market_probability, model_probability, edge,
                     distance_pct, orderbook_imbalance, momentum_3m, momentum_5m,
                     momentum_10m, volatility_10m, range_5m, trend, setup_score,
-                    action, confidence
+                    action, confidence, signal_version
                 ) VALUES (
                     :ticker,:asset,:series,:captured_at,:seconds_left,:time_bucket,
                     :target,:spot,:market_probability,:model_probability,:edge,
                     :distance_pct,:orderbook_imbalance,:momentum_3m,:momentum_5m,
                     :momentum_10m,:volatility_10m,:range_5m,:trend,:setup_score,
-                    :action,:confidence
+                    :action,:confidence,:signal_version
                 ) ON CONFLICT (ticker, time_bucket) DO NOTHING
             """), {
                 "ticker": x.get("ticker"), "asset": x.get("asset"), "series": x.get("series"),
@@ -175,16 +201,26 @@ def log_signals(rows):
                 "momentum_5m": x.get("momentum_5m"), "momentum_10m": x.get("momentum_10m"),
                 "volatility_10m": x.get("volatility_10m"), "range_5m": x.get("range_5m"),
                 "trend": x.get("trend"), "setup_score": x.get("setup_score"), "action": x.get("action"),
-                "confidence": x.get("confidence")
+                "confidence": x.get("confidence"), "signal_version": VERSION
             })
 
 
 def extract_outcome(payload):
     market = (payload or {}).get("market") or payload or {}
+    if market.get("is_provisional"):
+        return None
     result = str(market.get("result") or market.get("settlement_result") or "").lower()
     if result in ("yes", "no"):
         return result.upper()
-    value = market.get("settlement_value")
+    if market.get("is_provisional"):
+        return None
+    value = market.get("settlement_value_dollars")
+    if value is None and market.get("settlement_value") is not None:
+        # Legacy settlement_value is cents, not dollars.
+        value = num(market.get("settlement_value"), None)
+        value = value / 100 if value is not None else None
+    if market.get("status") not in ("settled", "finalized"):
+        return None
     if value is not None:
         try:
             value = float(value)
@@ -241,12 +277,30 @@ def performance_summary():
             FROM signals WHERE outcome IS NOT NULL
             GROUP BY action ORDER BY samples DESC
         """)).mappings().all()]
+        latest = [dict(r) for r in con.execute(text("""
+            SELECT s.* FROM signals s JOIN (
+                SELECT ticker, MAX(id) id FROM signals
+                WHERE correct IS NOT NULL AND signal_version=:version GROUP BY ticker
+            ) latest ON latest.id=s.id
+        """), {"version": VERSION}).mappings().all()]
+        predictions = [dict(r) for r in con.execute(text("""
+            SELECT s.model_probability, s.outcome FROM signals s JOIN (
+                SELECT ticker, MAX(id) id FROM signals WHERE outcome IN ('YES','NO')
+                AND model_probability IS NOT NULL AND signal_version=:version GROUP BY ticker
+            ) latest ON latest.id=s.id
+        """), {"version": VERSION}).mappings().all()]
+        unique_wins = sum(r["correct"] == 1 for r in latest)
+        brier = sum((r["model_probability"] - int(r["outcome"] == "YES")) ** 2 for r in predictions) / len(predictions) if predictions else None
         return {
             "snapshots": total,
             "settled_snapshots": settled,
             "actionable_graded": actionable,
             "wins": wins,
-            "win_rate": (wins / actionable) if actionable else None,
+            "win_rate": unique_wins / len(latest) if latest else None,
+            "unique_graded": len(latest), "unique_wins": unique_wins,
+            "snapshot_win_rate": (wins / actionable) if actionable else None,
+            "brier_score": brier, "brier_samples": len(predictions),
+            "grading_basis": "Latest directional v9 snapshot per distinct settled market",
             "markets_tracked": markets,
             "markets_settled": settled_markets,
             "by_action": by_action,
@@ -258,7 +312,10 @@ init_db()
 
 
 def get_json(url, params=None, timeout=6):
-    r = session.get(url, params=params, timeout=timeout)
+    if not hasattr(_thread_sessions, "session"):
+        _thread_sessions.session = requests.Session()
+        _thread_sessions.session.headers.update(session.headers)
+    r = _thread_sessions.session.get(url, params=params, timeout=timeout)
     r.raise_for_status()
     return r.json()
 
@@ -269,7 +326,8 @@ def kalshi_json(path, params=None, timeout=6):
 
 def num(value, default=0.0):
     try:
-        return float(value)
+        value = float(value)
+        return value if math.isfinite(value) else default
     except Exception:
         return default
 
@@ -304,8 +362,16 @@ def select_open_markets(markets):
             if close_ts is None:
                 continue
             seconds_left = close_ts - now
-            # Keep the currently active contract and a tiny grace period around close.
-            if -5 <= seconds_left <= 16 * 60 + 45:
+            open_time = m.get("open_time")
+            if open_time:
+                try:
+                    if datetime.fromisoformat(open_time.replace("Z", "+00:00")).timestamp() > now:
+                        continue
+                except ValueError:
+                    continue
+            if m.get("status") in ("closed", "settled", "finalized", "initialized"):
+                continue
+            if 0 < seconds_left <= 15 * 60 + 5:
                 candidates.append((seconds_left < 0, abs(seconds_left), m))
         if candidates:
             candidates.sort(key=lambda x: (x[0], x[1]))
@@ -326,7 +392,9 @@ def parse_target(market, spot=None):
     for key in ("floor_strike", "cap_strike", "strike", "strike_value", "reference_price"):
         value = num(market.get(key), None)
         if value is not None and value > 0:
-            candidates.append((0, value, key))
+            if spot is None or 0.25 <= value / spot <= 4:
+                return value
+            return None
 
     # Search the descriptive fields before the generic title. Targets can be < $1.
     text_fields = (
@@ -342,7 +410,6 @@ def parse_target(market, spot=None):
             r"\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
             r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:or\s+above|or\s+below|or\s+higher|or\s+lower)",
             r"(?:above|below|over|under|at|price(?:\s+of)?)\s*\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
-            r"([0-9][0-9,]*(?:\.[0-9]+)?)",
         )
         seen = set()
         for pattern in patterns:
@@ -397,8 +464,21 @@ def orderbook(ticker):
     ob = data.get("orderbook_fp") or data.get("orderbook") or {}
     yes_levels = ob.get("yes_dollars") or ob.get("yes") or []
     no_levels = ob.get("no_dollars") or ob.get("no") or []
-    yes_levels = yes_levels[:10] if isinstance(yes_levels, list) else []
-    no_levels = no_levels[:10] if isinstance(no_levels, list) else []
+    def clean(levels, dollars):
+        valid = []
+        for level in levels if isinstance(levels, list) else []:
+            if not isinstance(level, (list, tuple)) or len(level) < 2:
+                continue
+            price, qty = num(level[0], None), num(level[1], None)
+            if price is None or qty is None:
+                continue
+            price = price if dollars else price / 100
+            if 0 < price < 1 and qty > 0:
+                valid.append((price, qty))
+        return sorted(valid, reverse=True)[:10]
+
+    yes_levels = clean(yes_levels, "yes_dollars" in ob)
+    no_levels = clean(no_levels, "no_dollars" in ob)
 
     def qty_sum(levels):
         total = 0.0
@@ -413,21 +493,32 @@ def orderbook(ticker):
     no_qty = qty_sum(no_levels)
     total = yes_qty + no_qty
     imbalance = (yes_qty - no_qty) / total if total else 0.0
-    return {"yes_qty": yes_qty, "no_qty": no_qty, "imbalance": imbalance}
+    yes_bid = yes_levels[0][0] if yes_levels else None
+    no_bid = no_levels[0][0] if no_levels else None
+    return {"yes_qty": yes_qty, "no_qty": no_qty, "imbalance": imbalance,
+            "yes_bid": yes_bid, "no_bid": no_bid,
+            "yes_ask": 1 - no_bid if no_bid is not None else None,
+            "no_ask": 1 - yes_bid if yes_bid is not None else None}
 
 
 def spot_price(asset):
     try:
-        data = get_json(COINBASE_SPOT.format(asset=asset), timeout=3)
+        data = get_json(COINBASE_SPOT.format(asset=asset), timeout=6)
         amount = ((data or {}).get("data") or {}).get("amount")
         if amount is not None:
-            return num(amount, None)
+            price = num(amount, None)
+            if price and price > 0:
+                return price
     except Exception:
         pass
 
     try:
-        data = get_json("https://api.binance.com/api/v3/ticker/price", {"symbol": asset + "USDT"}, timeout=3)
-        return num((data or {}).get("price"), None)
+        pair = "XBTUSD" if asset == "BTC" else asset + "USD"
+        data = get_json("https://api.kraken.com/0/public/Ticker", {"pair": pair}, timeout=4)
+        result = data.get("result") or {}
+        value = next(iter(result.values()))["c"][0] if result else None
+        price = num(value, None)
+        return price if price and price > 0 else None
     except Exception:
         return None
 
@@ -451,18 +542,25 @@ def candle_stats(asset):
         "volatility_10m": None,
         "range_5m": None,
         "trend": "UNKNOWN",
+        "source_time": None,
     }
 
     try:
         candles = get_json(
             f"{COINBASE_EXCHANGE}/products/{asset}-USD/candles",
             params={"granularity": 60},
-            timeout=4,
+            timeout=6,
         )
         if not isinstance(candles, list) or len(candles) < 6:
             raise ValueError("not enough candle data")
 
-        candles = sorted(candles[:16], key=lambda x: x[0])
+        candles = sorted([c for c in candles if isinstance(c, list) and len(c) >= 6
+                          and 0 < num(c[0], 0) <= now
+                          and all(num(c[i], 0) > 0 for i in (1, 2, 3, 4))], key=lambda x: x[0])[-16:]
+        if len(candles) < 11 or now - num(candles[-1][0]) > 150:
+            raise ValueError("missing or stale candles")
+        if any(b[0] - a[0] != 60 for a, b in zip(candles[-11:-1], candles[-10:])):
+            raise ValueError("non-contiguous candles")
         closes = [num(c[4], None) for c in candles if len(c) >= 5]
         highs = [num(c[2], None) for c in candles if len(c) >= 5]
         lows = [num(c[1], None) for c in candles if len(c) >= 5]
@@ -512,6 +610,7 @@ def candle_stats(asset):
             "volatility_10m": vol,
             "range_5m": range_5m,
             "trend": trend,
+            "source_time": candles[-1][0],
         }
     except Exception:
         pass
@@ -534,7 +633,24 @@ def analyze(asset, market):
         spot = f_spot.result()
         stats = f_stats.result()
 
+    seconds_left = max(0.0, (close_ts or time.time()) - time.time())
     target = parse_target(market, spot)
+    bid, ask = ob["yes_bid"], ob["yes_ask"]
+    no_ask = ob["no_ask"]
+    market_p = (bid + ask) / 2 if bid is not None and ask is not None else None
+    quality = []
+    if not spot or spot <= 0:
+        quality.append("Spot feed unavailable")
+    if target is None:
+        quality.append("Reference price unavailable")
+    if stats.get("source_time") is None:
+        quality.append("Fresh contiguous candle data unavailable")
+    if bid is None or ask is None or no_ask is None:
+        quality.append("Two-sided order book unavailable")
+    elif ask < bid:
+        quality.append("Crossed order book; refresh required")
+    if seconds_left <= 12:
+        quality.append("Closing or expired contract")
     distance_pct = None
     distance_z = 0.0
     if spot and target:
@@ -555,8 +671,12 @@ def analyze(asset, market):
         + 0.38 * momentum_score
         + 0.45 * ob["imbalance"]
     )
-    model_p = sigmoid(score)
-    edge = model_p - market_p if market_p else 0.0
+    model_p = sigmoid(score) if not quality else None
+    yes_edge = model_p - ask if model_p is not None and ask is not None else None
+    no_edge = (1 - model_p) - no_ask if model_p is not None and no_ask is not None else None
+    side = "YES" if (yes_edge or 0) >= (no_edge or 0) else "NO"
+    best_edge = max(0.0, yes_edge or 0, no_edge or 0)
+    edge = best_edge if side == "YES" else -best_edge
 
     # Setup quality blends magnitude of edge, time relevance, and feature agreement.
     direction = 1 if edge >= 0 else -1
@@ -567,11 +687,11 @@ def analyze(asset, market):
         agreement += 1
     if ob["imbalance"] * direction > 0:
         agreement += 1
-    setup_score = clamp(abs(edge) * 520 + agreement * 8 + time_weight * 8, 0, 100)
+    setup_score = clamp(best_edge * 520 + agreement * 8 + time_weight * 8, 0, 100) if not quality else 0
 
     action = "PASS"
     confidence = "LOW"
-    if market_p and seconds_left > 12:
+    if not quality and market_p is not None and seconds_left > 12:
         if abs(edge) >= 0.14 and setup_score >= 72:
             action = "LEAN YES" if edge > 0 else "LEAN NO"
             confidence = "HIGH"
@@ -589,6 +709,15 @@ def analyze(asset, market):
         "seconds_left": round(seconds_left, 1),
         "yes_bid": bid,
         "yes_ask": ask,
+        "no_bid": ob["no_bid"],
+        "no_ask": no_ask,
+        "yes_edge": yes_edge,
+        "no_edge": no_edge,
+        "spread": ask - bid if ask is not None and bid is not None else None,
+        "close_time": close_ts,
+        "data_quality": "COMPLETE" if not quality else "INCOMPLETE",
+        "quality_notes": quality,
+        "spot_source": "External spot proxy, not settlement index",
         "last": last,
         "market_probability": market_p,
         "model_probability": model_p,
@@ -606,7 +735,7 @@ def analyze(asset, market):
         "setup_score": round(setup_score, 1),
         "action": action,
         "confidence": confidence,
-        "model_status": "HEURISTIC - PAPER MODE / CALIBRATION REQUIRED",
+        "model_status": "UNVALIDATED HEURISTIC - PAPER MODE / GROSS EDGE BEFORE FEES",
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -662,46 +791,96 @@ def build_scan():
                 except Exception as exc:
                     errors.append({"asset": asset, "stage": "analysis", "error": str(exc)})
 
+    completed_at = time.time()
+    for row in rows:
+        row["seconds_left"] = round(max(0.0, (row["close_time"] or completed_at) - completed_at), 1)
+        if row["seconds_left"] <= 12:
+            row.update(action="PASS", confidence="LOW", setup_score=0, data_quality="INCOMPLETE")
+            if "Closing or expired contract" not in row["quality_notes"]:
+                row["quality_notes"].append("Closing or expired contract")
     rows.sort(key=lambda x: (x["setup_score"], abs(x["edge"])), reverse=True)
     log_signals(rows)
 
     global _last_settlement_sweep
-    if time.time() - _last_settlement_sweep > 30:
+    if time.time() - _last_settlement_sweep > 30 and _settlement_lock.acquire(blocking=False):
         _last_settlement_sweep = time.time()
-        settle_pending()
+        def sweep():
+            try:
+                settle_pending(limit=4)
+            except Exception:
+                logger.exception("Settlement sweep failed")
+            finally:
+                _settlement_lock.release()
+        threading.Thread(target=sweep, daemon=True).start()
 
     perf = performance_summary()
     return {
         "markets": rows,
         "errors": errors,
-        "live": True,
+        "live": bool(rows),
         "found": list(chosen.keys()),
         "discovery": discovery,
         "elapsed_ms": round((time.time() - started) * 1000),
         "server_time": datetime.now(timezone.utc).isoformat(),
-        "model": "KNKB heuristic v8",
+        "model": "KNKB heuristic v9 (unvalidated)",
+        "version": VERSION,
         "performance": perf,
     }
 
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "version": "8.0", "time": datetime.now(timezone.utc).isoformat()}
+    return {"ok": True, "version": VERSION, "time": datetime.now(timezone.utc).isoformat(),
+            "storage": DB_STORAGE, "collector": dict(_collector_status)}
 
 
 @app.get("/api/scan")
 def scan():
-    # Prevent every phone refresh from hammering upstream APIs. All users share a ~2s snapshot.
-    now = time.time()
     with _cache_lock:
-        if _scan_cache["payload"] is not None and now - _scan_cache["ts"] < 2.0:
-            return _scan_cache["payload"]
+        cached, captured = _scan_cache["payload"], _scan_cache["ts"]
+    if cached is None:
+        if _scan_lock.acquire(blocking=False):
+            try:
+                collect_once()
+            finally:
+                _scan_lock.release()
+            with _cache_lock:
+                cached, captured = _scan_cache["payload"], _scan_cache["ts"]
+        if cached is None:
+            return {"markets": [], "errors": [], "live": False, "warming_up": True,
+                    "version": VERSION, "server_time": datetime.now(timezone.utc).isoformat()}
+    elif time.time() - captured >= SCAN_INTERVAL and _scan_lock.acquire(blocking=False):
+        def refresh():
+            try:
+                collect_once()
+            finally:
+                _scan_lock.release()
+        threading.Thread(target=refresh, daemon=True).start()
+    age = max(0, time.time() - captured)
+    return {**cached, "age_seconds": round(age, 1), "stale": age > STALE_AFTER,
+            "live": cached.get("live", False) and age <= STALE_AFTER,
+            "storage": DB_STORAGE, "storage_warning": DB_STORAGE != "postgres-persistent"}
 
-    payload = build_scan()
-    with _cache_lock:
-        _scan_cache["ts"] = time.time()
-        _scan_cache["payload"] = payload
-    return payload
+
+def collect_once():
+    try:
+        payload = build_scan()
+        with _cache_lock:
+            _scan_cache.update(ts=time.time(), payload=payload)
+        _collector_status.update(last_success=payload["server_time"], last_error=None)
+    except Exception:
+        logger.exception("Scan collection failed")
+        _collector_status["last_error"] = "Collection failed; check server logs"
+
+
+def collector(stop):
+    while not stop.is_set():
+        if _scan_lock.acquire(blocking=False):
+            try:
+                collect_once()
+            finally:
+                _scan_lock.release()
+        stop.wait(SCAN_INTERVAL)
 
 
 @app.get("/api/performance")
@@ -716,11 +895,26 @@ def history(limit: int = 100):
         rows = con.execute(text("""
             SELECT ticker, asset, captured_at, seconds_left, time_bucket, target, spot,
                    market_probability, model_probability, edge, setup_score, action,
-                   confidence, outcome, correct
+                   confidence, outcome, correct, signal_version
             FROM signals ORDER BY id DESC LIMIT :limit
         """), {"limit": limit}).mappings().all()
         rows = [dict(r) for r in rows]
         return {"rows": rows, "count": len(rows), "storage": DB_STORAGE}
+
+
+@app.get("/api/history.csv")
+def export_history(limit: int = 500):
+    rows = history(limit)["rows"]
+    output = io.StringIO()
+    fields = ["ticker", "asset", "captured_at", "seconds_left", "target", "spot",
+              "model_probability", "market_probability", "edge", "action", "outcome", "correct", "signal_version"]
+    writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        # Prevent spreadsheet formula evaluation from upstream text fields.
+        writer.writerow({k: ("'" + v if isinstance(v, str) and v.startswith(("=", "+", "-", "@")) else v)
+                         for k, v in row.items()})
+    return Response(output.getvalue(), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=knkb-history.csv", "Cache-Control": "no-store"})
 
 
 @app.head("/")
@@ -733,9 +927,7 @@ def index():
     return FileResponse(Path(__file__).parent / "index.html", headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache", "Expires": "0"})
 
 
-@app.get("/{path:path}")
-def static(path: str):
-    p = Path(__file__).parent / path
-    if p.exists() and p.is_file():
-        return FileResponse(p, headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache", "Expires": "0"})
-    return FileResponse(Path(__file__).parent / "index.html", headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache", "Expires": "0"})
+@app.get("/index.html", include_in_schema=False)
+def static_index():
+    return index()
+

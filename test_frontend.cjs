@@ -1,0 +1,26 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+const elements=new Map();
+const get=id=>{if(!elements.has(id))elements.set(id,{textContent:'',innerHTML:'',hidden:false,classList:{toggle(){},add(){}},addEventListener(){}});return elements.get(id)};
+const payload={live:true,age_seconds:0,server_time:new Date().toISOString(),performance:{markets_tracked:2,markets_settled:1,unique_graded:1,win_rate:1},markets:[{asset:'BTC',title:'<img src=x onerror=alert(1)>',seconds_left:100,model_probability:.6,market_probability:.5,spot:100,target:99,setup_score:75,action:'LEAN YES',confidence:'HIGH',quality_notes:[],yes_ask:.5,no_ask:.6,edge:.1}]};
+let calls=0;
+const ctx=vm.createContext({console,Date,Number,String,Math,AbortController,AbortSignal,setTimeout:()=>1,clearTimeout(){},setInterval(){},window:{addEventListener(){}},document:{hidden:false,getElementById:get,querySelectorAll:()=>[],addEventListener(){}},fetch:async()=>{calls++;return {ok:true,json:async()=>payload}}});
+const html=fs.readFileSync(__dirname+'/index.html','utf8');
+const script=html.split('<script>')[1].split('</script>')[0];
+vm.runInContext(script,ctx);
+const run=s=>vm.runInContext(s,ctx);
+(async()=>{
+ await new Promise(setImmediate);
+ assert.equal(get('marketCount').textContent,1);
+ assert(get('app').innerHTML.includes('&lt;img'));
+ assert(!get('app').innerHTML.includes('<img'));
+ run('lastReceipt=Date.now()-30000;render()');
+ assert(get('app').innerHTML.includes('STALE · WAIT'));
+ run('lastReceipt=Date.now();data[0].seconds_left=0;render()');
+ assert(get('app').innerHTML.includes('EXPIRED · WAIT'));
+ run('filter="FINAL5"');assert.equal(run('filtered().length'),1);
+ run('busy=true');const previous=calls;await run('load()');assert.equal(calls,previous);
+ run('busy=false');ctx.fetch=async()=>{throw Error('offline')};await run('load()');
+ assert.equal(get('status').textContent,'OFFLINE');assert.equal(run('data.length'),1);
+ assert(get('app').innerHTML.includes('STALE · WAIT'));
+ console.log('Frontend checks passed: rendering, title escaping, stale/expired suppression, filters, concurrent refresh guard, offline retention.');
+})();
